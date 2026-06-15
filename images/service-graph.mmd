@@ -1,0 +1,28 @@
+flowchart LR
+    subgraph Operator["Operator (agentctl / deploy.sh)"]
+        CLI[gcloud commands]
+    end
+
+    subgraph GCP["Google Cloud Platform"]
+        CB[Cloud Build]
+        AR[(Artifact Registry<br/>remote-agent image)]
+        SM[(Secret Manager<br/>id-token<br/>anthropic-api-key)]
+        IAM[IAM<br/>runtime SA + secretAccessor]
+        CR[Cloud Run service<br/>agent-id<br/>max-instances=1]
+    end
+
+    Dev[Claude Code<br/>on laptop]
+    API[Anthropic API]
+
+    CLI -->|builds image| CB
+    CB -->|pushes| AR
+    CLI -->|mints token| SM
+    CLI -->|binds policy| IAM
+    CLI -->|gcloud run deploy| CR
+
+    AR -.image.-> CR
+    SM -.mounted as env.-> CR
+    IAM -.authorizes mount.-> CR
+
+    Dev -->|HTTPS + Bearer token<br/>POST /mcp run_task| CR
+    CR -->|claude -p / Agent SDK| API

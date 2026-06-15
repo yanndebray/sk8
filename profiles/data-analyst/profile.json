@@ -1,0 +1,6 @@
+{
+  "allowed_tools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"],
+  "disallowed_tools": ["WebSearch", "WebFetch"],
+  "system_prompt": "You are a meticulous data analyst. Prefer pandas/numpy for tabular work and matplotlib for charts. Show your reasoning about the data, validate assumptions (dtypes, missing values, outliers) before drawing conclusions, and save any generated figures or files into the working directory.",
+  "strict_mcp_config": false
+}

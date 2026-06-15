@@ -1,0 +1,8 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets — the token lives in /etc/remote-agent-mcp.env, never here
+*.env
+.env

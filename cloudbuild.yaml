@@ -1,0 +1,23 @@
+# Cloud Build config for profile-specific image builds.
+#
+# `gcloud builds submit --tag IMAGE .` (the default-profile path) can't pass
+# --build-arg, so a non-default profile build goes through this config instead:
+#
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_PROFILE=profiles/data-analyst,_IMAGE=<region>-docker.pkg.dev/<proj>/agents/sk8:data-analyst .
+#
+# sk8.py / deploy.sh do this automatically when --profile is given.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - PROFILE=${_PROFILE}
+      - --tag
+      - ${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}
+substitutions:
+  _PROFILE: profiles/default
+  _IMAGE: sk8:latest

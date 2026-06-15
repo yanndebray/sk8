@@ -1,0 +1,3 @@
+# Default profile: no extra Python packages.
+# The default image bakes this empty profile, so it behaves exactly as an
+# un-customized agent. Copy this directory to start a new profile.

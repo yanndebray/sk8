@@ -1,239 +1,119 @@
-# agent-as-MCP
+# sk8 🛹
 
-A minimal [FastMCP](https://gofastmcp.com) server that exposes **one tool**,
-`run_task`, over HTTP. The tool delegates a complete, self-contained task to a
-Claude Code agent running headless on *this* machine and returns the agent's
-final text answer. Synchronous and blocking — no queue, no streaming, no status
-polling.
 
-## How it works
+A minimal MCP server that exposes a **remote Claude Code agent** over HTTP.
+Claude Code on your laptop can call its one tool, `run_task`, to delegate a
+complete, self-contained task to a Claude Code instance running on this machine.
 
-`run_task(prompt, cwd)` shells out to:
+The tool runs `claude` headless here and returns the final text answer.
+It is **synchronous and blocking** — no queue, no streaming, no status polling.
 
-```
-claude -p <prompt> --output-format text --permission-mode bypassPermissions
-```
+**`server_sdk.py`** — drives the same agent loop through the **Claude Agent
+SDK** (`claude-agent-sdk`), giving a typed async message stream and structured
+permission control. **This is what the container image runs**, because
+`ClaudeAgentOptions` applies per-agent profile customization (tools, MCP,
+system prompt) natively. 
 
-run inside `cwd`, with a 600 s timeout. On success you get stdout; on failure
-or timeout you get a string starting with `AGENT_ERROR:`.
+Agents can be **customized per profile** — extra Python packages, bundled Claude
+Code skills, and a tool/MCP/system-prompt spec baked into the image at build
+time.
 
-Requires the `claude` CLI to be installed and authenticated on this machine.
+## GCP project setup (one-time)
 
-**Why `bypassPermissions`:** the call is a single blocking request that returns
-only the agent's final text — there is no channel to approve tool prompts
-mid-run. So the spawned agent must run fully unattended; otherwise any task
-needing Bash/Write stalls forever on an approval it can never receive.
-`bypassPermissions` refuses to run under root unless the host is marked a
-sandbox, so the server also sets `IS_SANDBOX=1` in the subprocess environment.
-This means the remote agent runs **every tool with no confirmation** — see
-Limitations.
-
-## Architecture (as deployed)
-
-```
-laptop ──HTTPS──> Caddy :443 ──HTTP──> 127.0.0.1:8080 (FastMCP) ──> claude CLI
-        (Let's Encrypt)      (loopback only)
-```
-
-- **FastMCP server** (`server.py`) binds **`127.0.0.1:8080`** — never exposed
-  publicly. The only way in is via Caddy.
-- **Caddy** terminates TLS on `:443` for the public domain and reverse-proxies
-  to the loopback server, preserving the path (`/mcp` → `localhost:8080/mcp`).
-- Both run as **systemd services** so they survive reboots and restart on
-  failure.
-
-This repo's example domain is `DOMAIN_EXAMPLE`; substitute your
-own throughout.
-
-## Token
-
-`AGENT_TOKEN` gates every request (`Authorization: Bearer <token>`); the server
-refuses to start if it is unset. Keep it in a `.env` file (git-ignored) so the
-systemd unit and your shells share one persistent value:
+The `sk8` CLI drives `gcloud` to provision agents on Cloud Run, so a GCP project
+has to be prepared once before `sk8 create` will work. Run these once per
+project (not per agent):
 
 ```bash
-echo "AGENT_TOKEN=$(openssl rand -hex 16)" > .env
-chmod 600 .env
+# 1. Install the gcloud SDK, then authenticate.
+gcloud auth login
+
+# 2. Select the project sk8 should deploy into (must have billing enabled).
+gcloud config set project YOUR_PROJECT_ID
+
+# 3. Enable the APIs sk8 uses (Cloud Run, Secret Manager, Artifact Registry, Cloud Build).
+gcloud services enable \
+  run.googleapis.com \
+  secretmanager.googleapis.com \
+  artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com
+
+# 4. Create the Docker repo sk8 pushes the agent image to.
+#    The name "agents" and location must match sk8's defaults
+#    (--repo agents, --region us-central1); override both flags if you change them.
+gcloud artifacts repositories create agents \
+  --repository-format=docker --location=us-central1
+
+# 5. Store the shared Claude credential the agents run under, as the
+#    "anthropic-api-key" secret (sk8 mounts it into every agent).
+printf '%s' "$ANTHROPIC_API_KEY" | \
+  gcloud secrets create anthropic-api-key --data-file=-
 ```
 
-The exact string in `.env` is what your laptop registers with — see below.
+With that in place, `sk8 create <id> --build` builds the image (first time) and
+deploys the agent. You can preview every `gcloud` command without running it via
+`sk8 create <id> --dry-run`.
 
-## Setup
+## 🛹 CLI
 
-### 1. Dependencies
+`sk8` is the command-line tool for managing agents — scriptable for both humans
+and agents alike. It exposes the full agent lifecycle and emits JSON so a running
+agent can spawn and register sub-agents. Install it as a console script to run
+`sk8 <cmd>` from anywhere, or run it in place with `python sk8.py <cmd>`:
 
 ```bash
-uv sync
+uv tool install .                  # install the `sk8` command from this repo
+uv tool install --reinstall .      # reinstall after pulling/editing the code
+uv tool uninstall sk8              # remove it
+# (or use pipx/pip: `pipx install .` / `pipx reinstall sk8`)
 ```
 
-### 2. Run the MCP server as a systemd service
-
-`/etc/systemd/system/remote-agent-mcp.service`:
-
-```ini
-[Unit]
-Description=Remote Agent MCP server (FastMCP -> claude CLI)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/root/remote-agent-mcp
-EnvironmentFile=/root/remote-agent-mcp/.env
-# The default systemd PATH omits ~/.local/bin (where the claude CLI lives) and
-# sets no HOME, so claude can't be found or locate its ~/.claude credentials.
-# Both are required for run_task to spawn the agent.
-Environment=HOME=/root
-Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/root/.local/bin/uv run server.py
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
+Then drive the agent lifecycle:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now remote-agent-mcp
-systemctl is-active remote-agent-mcp        # -> active
-ss -ltnp | grep 127.0.0.1:8080              # listening on loopback
+sk8 create iris --build     # build image (first time) + provision
+sk8 create iris             # subsequent agents reuse the image
+sk8 create iris --profile ./profiles/data-analyst --build  # custom deps/skills/tools
+sk8 create iris --json      # for agents: parse back {url, token, mcp_add_command}
+sk8 create iris --dry-run   # preview the gcloud commands offline
+sk8 list                    # list deployed agents in the region
+sk8 delete iris --yes       # tear down the service + its token secret
+sk8 suggest 5               # propose adjective-noun names
 ```
 
-(For quick local hacking without systemd you can still run it by hand:
-`set -a; source .env; set +a; uv run server.py`.)
-
-### 3. Caddy reverse proxy with automatic HTTPS
-
-Install Caddy (Debian/Ubuntu, official apt repo):
-
-```bash
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt update && sudo apt install -y caddy
-```
-
-DNS prerequisite for automatic HTTPS: the domain's **A (and AAAA, if any)
-record must point directly at this box's public IP** — *not* proxied through a
-CDN such as Cloudflare. If it sits behind Cloudflare's proxy (orange cloud),
-set the record to **DNS-only (grey cloud)**, otherwise Caddy's Let's Encrypt
-challenge can't complete. Verify with `dig +short A your.domain @1.1.1.1`.
-
-`/etc/caddy/Caddyfile`:
-
-```caddy
-DOMAIN_EXAMPLE {
-	# Reverse-proxy everything (including /mcp) to the local FastMCP server.
-	# Path is preserved, so /mcp -> 127.0.0.1:8080/mcp.
-	# flush_interval -1 disables response buffering so MCP's Server-Sent
-	# Events (text/event-stream) stream through immediately.
-	# Use 127.0.0.1 (not "localhost") to match the server's IPv4 bind —
-	# "localhost" can resolve to [::1] and fail to connect.
-	reverse_proxy 127.0.0.1:8080 {
-		flush_interval -1
-	}
-}
-```
-
-```bash
-sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo systemctl reload caddy
-journalctl -u caddy -n 30 | grep -i 'certificate obtained'   # cert issued
-```
-
-Caddy fetches and auto-renews the Let's Encrypt certificate; no further action
-needed.
-
-## Smoke test (curl)
-
-MCP's streamable-HTTP transport is session-based: you `initialize` to get a
-session id, send the `initialized` notification, then call `tools/list`. This
-works against either the local backend (`http://127.0.0.1:8080/mcp`) or the
-public endpoint (`https://DOMAIN_EXAMPLE/mcp`):
-
-```bash
-URL=https://DOMAIN_EXAMPLE/mcp
-TOKEN=$(cut -d= -f2 .env)
-
-# 1. initialize — grab the mcp-session-id response header
-curl -s -D /tmp/hdrs.txt "$URL" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
-
-SID=$(grep -i '^mcp-session-id:' /tmp/hdrs.txt | awk '{print $2}' | tr -d '\r')
-
-# 2. notifications/initialized
-curl -s -o /dev/null "$URL" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Content-Type: application/json" -H "mcp-session-id: $SID" \
-  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-
-# 3. tools/list — should list run_task
-curl -s "$URL" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Content-Type: application/json" -H "mcp-session-id: $SID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
-```
-
-The final response includes `"name":"run_task"`. A request with a missing or
-wrong bearer token returns `401`.
-
-## Register from your laptop
-
-```bash
-claude mcp add --transport http remote-agent \
-  https://DOMAIN_EXAMPLE/mcp \
-  --header "Authorization: Bearer <AGENT_TOKEN>"
-```
-
-Use the HTTPS URL and the `<AGENT_TOKEN>` value from the server's `.env`.
+`create` prints the end-user's `claude mcp add` line (with `--json`, in the
+`mcp_add_command` field). Re-running `create` with an existing id rotates its
+token and redeploys.
 
 ## Verify
 
 ```bash
-claude mcp list        # remote-agent should show as connected
+claude mcp list        # sk8 should show as connected
 ```
 
-Then, in a Claude Code session on your laptop:
+Then in a Claude Code session on your laptop:
 
-> Use the remote-agent run_task tool with prompt: "list the files in the
-> current directory and summarize them".
+> Use the sk8 run_task tool with prompt:
+> "list the files in the current directory and summarize them"
 
-## Operations
+The remote agent runs the task in its `cwd` and returns the final answer.
 
-```bash
-systemctl status remote-agent-mcp caddy   # health of both services
-journalctl -u remote-agent-mcp -f         # MCP server logs
-journalctl -u caddy -f                    # proxy / access logs
-sudo systemctl restart remote-agent-mcp   # after editing server.py or .env
-sudo systemctl reload caddy               # after editing the Caddyfile
-```
+## Cloud deployment (Cloud Run, App Runner, Fly, …)
+
+The GCP services (Cloud Build, Artifact Registry, Secret Manager, IAM, Cloud
+Run) and the agent lifecycle — image build → token mint → a `run_task` call
+triggering Cloud Run:
+
+![GCP service graph](images/remote-agent-gcp-architecture.svg)
+
 
 ## Limitations
 
-- **Synchronous only.** Each call blocks until the remote agent finishes (up to
-  the 600 s timeout). No streaming, no job ids, no progress.
-- **One task at a time** in practice — a long task ties up the call. There is no
-  queue or concurrency management.
-- **Fully autonomous agent.** The spawned `claude` runs in
-  `bypassPermissions` mode (with `IS_SANDBOX=1` to allow it as root): it
-  executes every tool — Bash, Write, network — with **no confirmation**. A
-  single static bearer token is the *only* thing gating that. Anyone with the
-  token can run arbitrary commands as root on this box, in whatever `cwd` they
-  pass. Treat the token as a production secret, scope `cwd` deliberately, and
-  only run this on a host you're willing to hand over completely. For tighter
-  scoping, replace `--permission-mode bypassPermissions` in `server.py` with
-  `--allowedTools "Bash Write Edit Read"` (grants only those tools; tasks
-  needing anything else will stall).
-- **Public exposure.** The server is reachable over the internet via the domain.
-  Consider a host firewall allowing only `:443`/`:22`. The loopback bind means
-  `:8080` itself is not directly reachable; all traffic must pass through Caddy
-  (TLS + token). For a private alternative, skip the public DNS/Caddy entirely
-  and use an SSH tunnel: `ssh -L 8080:localhost:8080 host`.
+- **Synchronous only** — `run_task` blocks until the remote agent finishes (up
+  to a 600s timeout). No streaming, no progress, no status to poll.
+- **One task at a time** — there's no queue or concurrency management; fire tasks
+  serially.
+- **Arbitrary code execution** — `claude` can do anything the host user can. 
+  Treat reaching this endpoint as equivalent to a shell on the box.
+- **Stateless across calls** — each `run_task` is a fresh headless `claude`
+  invocation with no memory of previous tasks. Put all needed context in the prompt.

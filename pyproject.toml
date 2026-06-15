@@ -1,7 +1,38 @@
 [project]
-name = "remote-agent-mcp"
-version = "0.1.0"
+name = "sk8"
+version = "0.5.1"
+description = "MCP server exposing a remote Claude Code agent over HTTP"
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "fastmcp>=3.4.2",
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "Yann Debray", email = "debray.yann@gmail.com" }]
+keywords = ["mcp", "claude", "agent", "claude-code", "cloud-run"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development",
 ]
+dependencies = [
+    "claude-agent-sdk>=0.2.101",
+    "fastmcp>=3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yanndebray/sk8"
+Repository = "https://github.com/yanndebray/sk8"
+
+# Installs `sk8` as a console script (`pip install .` / `uv tool install .`),
+# so the CLI runs as `sk8 <cmd>` instead of `python sk8.py <cmd>`.
+# `python -m sk8` also works (single-module, runs its __main__ guard).
+[project.scripts]
+sk8 = "sk8:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Single-file modules at the repo root (no package dir), so tell hatchling
+# exactly which files ship in the wheel rather than inferring from the name.
+[tool.hatch.build.targets.wheel]
+only-include = ["sk8.py", "server.py", "server_sdk.py", "profile_config.py"]
