@@ -29,8 +29,11 @@ WORKDIR /app
 # be present for `uv sync` to build the project; it's not used at runtime.
 # README.md is required too: pyproject's `readme = "README.md"` makes hatchling
 # read it during the build.
-COPY pyproject.toml uv.lock README.md server.py server_sdk.py profile_config.py sk8.py ./
-RUN uv sync --frozen
+COPY pyproject.toml uv.lock README.md server.py server_sdk.py profile_config.py file_io.py sk8.py ./
+# --extra gcs pulls in google-cloud-storage so the deployed agent can mint signed
+# URLs and shuttle files to/from GCS (issue #14). Harmless when GCS_BUCKET is
+# unset — file_io.enabled() is then False and the file-I/O tools don't register.
+RUN uv sync --frozen --extra gcs
 
 # --- Per-agent profile -------------------------------------------------------
 ARG PROFILE=profiles/default
@@ -46,6 +49,11 @@ RUN python3 -m venv /opt/agent-venv \
       /opt/agent-venv/bin/pip install --no-cache-dir -r /profile/requirements.txt; \
     fi
 ENV PATH="/opt/agent-venv/bin:$PATH"
+# The server runs via `uv run`, which activates its own project venv and puts
+# that bin ahead on PATH — so the ENV PATH above isn't enough on its own. The
+# servers read AGENT_TASK_VENV and re-prepend this venv for the agent's task
+# subprocess, so the agent's python3 resolves the profile's packages.
+ENV AGENT_TASK_VENV=/opt/agent-venv
 
 # Bundle the profile's Claude Code skills where the agent auto-discovers them
 # (root's HOME is /root; Claude Code reads ~/.claude/skills).

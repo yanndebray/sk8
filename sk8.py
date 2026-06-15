@@ -37,8 +37,9 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 
-__version__ = "0.5.1"
+__version__ = "0.6.1"
 
 # Side-view skateboard, shown as a banner on each invocation (stderr, so it
 # never pollutes --json stdout; muted by --quiet like all other progress).
@@ -251,6 +252,49 @@ def cmd_create(args: argparse.Namespace) -> int:
                "--role=roles/secretmanager.secretAccessor", "--quiet",
                capture=True, dry_run=args.dry_run)
 
+    # Optional GCS file-transfer wiring (#14): with --bucket, create the bucket
+    # (idempotent), grant the runtime SA object access + the
+    # serviceAccountTokenCreator-on-itself needed to sign URLs with no key file,
+    # and pass GCS_BUCKET/AGENT_NAME to the service. Without --bucket the feature
+    # stays dark and run_task is text-only.
+    env_vars = f"AGENT_NAME={agent_id}"
+    if args.bucket:
+        bucket_exists = (not args.dry_run) and subprocess.run(
+            ["gcloud", "storage", "buckets", "describe", f"gs://{args.bucket}"],
+            capture_output=True, text=True,
+        ).returncode == 0
+        if not bucket_exists:
+            eprint(f">> creating bucket gs://{args.bucket}")
+            gcloud("storage", "buckets", "create", f"gs://{args.bucket}",
+                   f"--location={region}", "--quiet", dry_run=args.dry_run)
+        gcloud("storage", "buckets", "add-iam-policy-binding", f"gs://{args.bucket}",
+               f"--member=serviceAccount:{runtime_sa}",
+               "--role=roles/storage.objectAdmin", "--quiet",
+               capture=True, dry_run=args.dry_run)
+        gcloud("iam", "service-accounts", "add-iam-policy-binding", runtime_sa,
+               f"--member=serviceAccount:{runtime_sa}",
+               "--role=roles/iam.serviceAccountTokenCreator", "--quiet",
+               capture=True, dry_run=args.dry_run)
+        # Lifecycle TTL (issue #6): delete objects older than --ttl-days so
+        # inputs/outputs don't accumulate forever. Idempotent; 0 = leave as-is.
+        if args.ttl_days > 0:
+            rule = {"rule": [{"action": {"type": "Delete"},
+                              "condition": {"age": args.ttl_days}}]}
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".json", delete=False
+            ) as fh:
+                json.dump(rule, fh)
+                lifecycle_file = fh.name
+            try:
+                gcloud("storage", "buckets", "update", f"gs://{args.bucket}",
+                       f"--lifecycle-file={lifecycle_file}", "--quiet",
+                       capture=True, dry_run=args.dry_run)
+            finally:
+                os.unlink(lifecycle_file)
+            eprint(f">> bucket lifecycle: objects deleted after {args.ttl_days} day(s)")
+        env_vars += f",GCS_BUCKET={args.bucket}"
+        eprint(f">> file transfer enabled: bucket={args.bucket} (object prefix {agent_id}/)")
+
     # Deploy a dedicated Cloud Run service for this agent.
     #   --concurrency=8 : NOT for parallel tasks — MCP's streamable-HTTP
     #   transport holds several connections open per session (a long-lived GET
@@ -266,6 +310,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         f"--cpu={args.cpu}", f"--memory={args.memory}",
         "--min-instances=0", "--max-instances=1", "--concurrency=8",
         f"--set-secrets=AGENT_TOKEN={token_secret}:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest",
+        f"--set-env-vars={env_vars}",
         dry_run=args.dry_run,
     )
 
@@ -287,6 +332,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         json.dump(
             {"agent_id": agent_id, "project": project, "region": region,
              "profile": tag if profile_rel else "default",
+             "bucket": args.bucket, "file_transfer": bool(args.bucket),
              "url": url, "token": token, "mcp_add_command": mcp_add},
             sys.stdout,
         )
@@ -371,6 +417,12 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--profile", help="path to an agent profile dir (e.g. ./profiles/data-analyst): "
                    "extra Python deps, skills, and a tool/system-prompt spec baked into the image. "
                    "Distinct profiles get distinct image tags; same profile reuses one image.")
+    c.add_argument("--bucket", help="GCS bucket to enable file in/out via signed URLs: "
+                   "creates it if needed, grants the runtime SA the IAM it needs, and sets "
+                   "GCS_BUCKET/AGENT_NAME on the service. Unset = text-only run_task.")
+    c.add_argument("--ttl-days", type=int, default=7, metavar="N",
+                   help="with --bucket, set a lifecycle rule deleting objects after N days "
+                   "(default: 7; 0 = no TTL / keep forever).")
     c.add_argument("--build", action="store_true", help="build & push the image first")
     c.add_argument("--json", action="store_true", help="emit {agent_id,url,token,...} as JSON on stdout (for agents)")
     c.add_argument("--dry-run", action="store_true", help="print the gcloud commands without running them")

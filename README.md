@@ -107,6 +107,29 @@ triggering Cloud Run:
 ![GCP service graph](images/remote-agent-gcp-architecture.svg)
 
 
+## File transfer (optional, GCS-backed)
+
+Pass files in and out of `run_task` without bloating the prompt or hitting Cloud
+Run's 32 MB request cap. Provision an agent with a bucket:
+
+```sh
+sk8 create iris --bucket my-agents-bucket --build   # or: BUCKET=my-agents-bucket ./deploy.sh iris
+```
+
+This wires up GCS signed URLs and a `--ttl-days` lifecycle rule (default 7 days)
+so inputs/outputs auto-expire. The agent then exposes two extra tools:
+
+- `request_upload_url(filename, content_type)` → a signed **PUT** URL; upload an
+  input straight to the bucket, then pass its object key to
+  `run_task(inputs=[...])`.
+- `fetch_result(object)` → re-mint a signed **GET** URL for an artifact.
+
+`run_task` also accepts small files inline (`files=[{"name", "content_base64"}]`,
+no bucket needed). Anything the agent writes under `cwd/outputs/` comes back in a
+trailing `Artifacts:` block — signed download URLs when GCS-backed, else inline
+base64. Without a bucket the feature stays dark and `run_task` is text-only. See
+[`docs/file-transfer.md`](docs/file-transfer.md) for the full design.
+
 ## Limitations
 
 - **Synchronous only** — `run_task` blocks until the remote agent finishes (up

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Provision one sk8 agent on GCP Cloud Run and print the end-user's
+# Provision one sk8 on GCP Cloud Run and print the end-user's
 # `claude mcp add` command. See docs/cloud-deployment.md for the full writeup
 # (granularity choices, the self-serve control-plane pattern, security notes).
 #
@@ -21,6 +21,10 @@
 #             e.g. PROFILE=./profiles/data-analyst ./deploy.sh iris --build
 #             bakes extra Python deps, skills, and a tool/system-prompt spec
 #             into the image. Distinct profiles get distinct image tags.
+#   BUCKET    GCS bucket for file I/O   (default: none -> file transfer off)
+#             e.g. BUCKET=my-agents-bucket ./deploy.sh iris
+#             creates the bucket + grants IAM + sets GCS_BUCKET/AGENT_NAME so
+#             request_upload_url / fetch_result / run_task(inputs=…) work.
 #
 # One-time project setup (run once, not per agent):
 #   gcloud services enable run.googleapis.com secretmanager.googleapis.com \
@@ -93,6 +97,8 @@ PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${REGION:-us-central1}"
 REPO="${REPO:-agents}"
 PROFILE="${PROFILE:-}"
+BUCKET="${BUCKET:-}"
+GCS_TTL_DAYS="${GCS_TTL_DAYS:-7}"   # auto-delete bucket objects after N days (0 = keep forever)
 SERVICE="$AGENT_ID"
 TOKEN_SECRET="$AGENT_ID-token"
 
@@ -141,6 +147,42 @@ for SECRET in "$TOKEN_SECRET" anthropic-api-key; do
     --role="roles/secretmanager.secretAccessor" --quiet >/dev/null
 done
 
+# --- Optional: GCS file-transfer wiring (issue #14) --------------------------
+# Set BUCKET to pass files in/out via signed URLs. We create the bucket
+# (idempotent), grant the runtime SA object access + the
+# serviceAccountTokenCreator-on-itself needed to sign URLs with no key file,
+# then pass GCS_BUCKET/AGENT_NAME to the service. Unset BUCKET -> the feature
+# stays dark and run_task is text-only, exactly as before.
+#   BUCKET=my-agents-bucket ./deploy.sh iris
+# GCS_TTL_DAYS sets a bucket lifecycle rule (issue #6) so inputs/outputs don't
+# accumulate forever; the uuid/run-id key layout makes age-based deletion safe.
+ENV_VARS="AGENT_NAME=$AGENT_ID"
+if [ -n "$BUCKET" ]; then
+  if ! gcloud storage buckets describe "gs://$BUCKET" >/dev/null 2>&1; then
+    echo ">> creating bucket gs://$BUCKET" >&2
+    gcloud storage buckets create "gs://$BUCKET" --location="$REGION" --quiet
+  fi
+  gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
+    --member="serviceAccount:$RUNTIME_SA" \
+    --role="roles/storage.objectAdmin" --quiet >/dev/null
+  gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+    --member="serviceAccount:$RUNTIME_SA" \
+    --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null
+  # Lifecycle TTL: delete objects older than GCS_TTL_DAYS. Idempotent — re-running
+  # deploy just re-applies the rule. GCS_TTL_DAYS=0 leaves any existing rule alone.
+  if [ "$GCS_TTL_DAYS" -gt 0 ] 2>/dev/null; then
+    LIFECYCLE_FILE="$(mktemp)"
+    printf '{"rule":[{"action":{"type":"Delete"},"condition":{"age":%s}}]}\n' \
+      "$GCS_TTL_DAYS" >"$LIFECYCLE_FILE"
+    gcloud storage buckets update "gs://$BUCKET" \
+      --lifecycle-file="$LIFECYCLE_FILE" --quiet >/dev/null
+    rm -f "$LIFECYCLE_FILE"
+    echo ">> bucket lifecycle: objects deleted after $GCS_TTL_DAYS day(s)" >&2
+  fi
+  ENV_VARS="$ENV_VARS,GCS_BUCKET=$BUCKET"
+  echo ">> file transfer enabled: bucket=$BUCKET (object prefix: $AGENT_ID/)" >&2
+fi
+
 # Deploy a dedicated Cloud Run service for this agent.
 #   --timeout=3600  : tasks run up to 600s; the 300s default would 504 them
 #   --concurrency=8 : NOT for parallel tasks — MCP's streamable-HTTP transport
@@ -157,7 +199,8 @@ gcloud run deploy "$SERVICE" \
   --timeout=3600 \
   --cpu=2 --memory=2Gi \
   --min-instances=0 --max-instances=1 --concurrency=8 \
-  --set-secrets="AGENT_TOKEN=$TOKEN_SECRET:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest"
+  --set-secrets="AGENT_TOKEN=$TOKEN_SECRET:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest" \
+  --set-env-vars="$ENV_VARS"
 
 # --- Optional: persistent state between runs/sessions (see docs §9) ----------
 # Stateless by default (in-memory /tmp wiped each run). To give the agent a
