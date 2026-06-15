@@ -42,6 +42,28 @@ def mcp_config_path() -> str | None:
     return path if os.path.isfile(path) else None
 
 
+def task_env() -> dict:
+    """Environment for the agent's task subprocess (shared by both backends).
+
+    Two things every task needs:
+      * ``IS_SANDBOX=1`` — bypassPermissions refuses to run as root otherwise.
+      * The **profile venv** ahead on PATH. The image installs the profile's
+        Python deps into ``$AGENT_TASK_VENV`` (``/opt/agent-venv``), but the
+        server is launched via ``uv run``, which activates its *own* project
+        venv and puts that bin first on PATH — so the agent's ``python3`` would
+        resolve there (fastmcp + gcs, none of the profile packages) and
+        ``import pandas`` would fail. Prepend the profile venv's bin and point
+        VIRTUAL_ENV at it so the agent sees pandas/numpy/etc. No-op locally,
+        where ``AGENT_TASK_VENV`` is unset.
+    """
+    env = {**os.environ, "IS_SANDBOX": "1"}
+    venv = os.environ.get("AGENT_TASK_VENV")
+    if venv:
+        env["PATH"] = os.path.join(venv, "bin") + os.pathsep + env.get("PATH", "")
+        env["VIRTUAL_ENV"] = venv
+    return env
+
+
 def to_cli_args(profile: dict) -> list[str]:
     """Map a profile to extra `claude -p` flags (CLI backend, server.py)."""
     args: list[str] = []

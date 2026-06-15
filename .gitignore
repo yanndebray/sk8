@@ -6,3 +6,9 @@ __pycache__/
 # Secrets — the token lives in /etc/remote-agent-mcp.env, never here
 *.env
 .env
+
+# ai-replay
+claude-*/
+
+# MacOS
+.DS_Store
