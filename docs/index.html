@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sk8 🛹 — remote Claude Code agents over MCP</title>
+<meta name="description" content="A minimal MCP server that exposes a remote Claude Code agent over HTTP. Delegate self-contained tasks to a Claude Code instance running anywhere.">
+<meta property="og:title" content="sk8 🛹">
+<meta property="og:description" content="Remote Claude Code agents over MCP. One tool, run_task, delegates a whole task to an agent running on Cloud Run.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0e14;
+    --bg-soft:#0e131c;
+    --panel:#11161f;
+    --border:#1e2733;
+    --fg:#c4cbd6;
+    --fg-dim:#7d8799;
+    --accent:#5ef2b3;      /* neon mint */
+    --accent2:#56b6ff;     /* electric blue */
+    --accent3:#f78c6c;     /* warm orange */
+    --magenta:#e07bff;
+    --yellow:#ffd479;
+    --red:#ff6b8a;
+    --glow:0 0 24px rgba(94,242,179,.25);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--fg);
+    font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    line-height:1.65;
+    font-size:15px;
+    overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* animated grid + scanline backdrop */
+  body::before{
+    content:"";position:fixed;inset:0;z-index:-2;
+    background:
+      radial-gradient(900px 500px at 80% -10%, rgba(86,182,255,.10), transparent 60%),
+      radial-gradient(700px 500px at 5% 10%, rgba(94,242,179,.08), transparent 55%),
+      linear-gradient(var(--border) 1px, transparent 1px) 0 0/100% 38px,
+      linear-gradient(90deg, var(--border) 1px, transparent 1px) 0 0/38px 100%;
+    opacity:.35;
+    mask-image:linear-gradient(180deg, #000 0%, transparent 95%);
+    -webkit-mask-image:linear-gradient(180deg, #000 0%, transparent 95%);
+    animation:drift 60s linear infinite;
+  }
+  @keyframes drift{to{background-position:0 0,0 0, 0 760px, 760px 0}}
+  body::after{
+    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background:repeating-linear-gradient(180deg, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.18) 2px 4px);
+    opacity:.25;mix-blend-mode:multiply;
+  }
+  a{color:var(--accent2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  ::selection{background:rgba(94,242,179,.3);color:#fff}
+
+  .wrap{max-width:980px;margin:0 auto;padding:0 22px}
+
+  /* ---------- nav ---------- */
+  nav{
+    position:sticky;top:0;z-index:50;
+    backdrop-filter:blur(10px);
+    background:rgba(10,14,20,.72);
+    border-bottom:1px solid var(--border);
+  }
+  nav .wrap{display:flex;align-items:center;gap:20px;height:58px}
+  .brand{font-weight:800;font-size:18px;color:#fff;letter-spacing:.5px}
+  .brand .blink{color:var(--accent)}
+  nav .links{margin-left:auto;display:flex;gap:22px;font-size:13px}
+  nav .links a{color:var(--fg-dim)}
+  nav .links a:hover{color:var(--accent);text-decoration:none}
+
+  /* ---------- hero ---------- */
+  header{padding:74px 0 40px;text-align:center}
+  .tag{
+    display:inline-block;font-size:12px;color:var(--accent);
+    border:1px solid rgba(94,242,179,.35);border-radius:999px;
+    padding:5px 14px;margin-bottom:26px;letter-spacing:1px;
+    box-shadow:var(--glow);
+  }
+  h1{
+    font-size:clamp(48px,12vw,116px);font-weight:800;color:#fff;line-height:.95;
+    letter-spacing:-2px;
+    text-shadow:0 0 40px rgba(94,242,179,.35);
+  }
+  h1 .board{display:inline-block;animation:roll 3.4s ease-in-out infinite}
+  @keyframes roll{0%,100%{transform:translateX(0) rotate(0)}25%{transform:translateX(10px) rotate(8deg)}75%{transform:translateX(-10px) rotate(-8deg)}}
+  .sub{margin:24px auto 0;max-width:680px;color:var(--fg-dim);font-size:16px}
+  .sub b{color:var(--fg);font-weight:500}
+  .cta{margin-top:36px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{
+    font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;
+    padding:12px 22px;border-radius:9px;border:1px solid var(--border);
+    background:var(--panel);color:var(--fg);transition:.18s;
+  }
+  .btn:hover{transform:translateY(-2px)}
+  .btn.primary{background:var(--accent);color:#05140d;border-color:var(--accent);box-shadow:var(--glow)}
+  .btn.primary:hover{box-shadow:0 0 34px rgba(94,242,179,.5)}
+  .btn.ghost:hover{border-color:var(--accent2);color:var(--accent2)}
+
+  /* ---------- terminal ---------- */
+  .term{
+    margin:54px auto 0;max-width:760px;text-align:left;
+    background:linear-gradient(180deg,#0c111a,#0a0e15);
+    border:1px solid var(--border);border-radius:12px;overflow:hidden;
+    box-shadow:0 30px 80px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(94,242,179,.04);
+  }
+  .term-bar{
+    display:flex;align-items:center;gap:8px;padding:11px 15px;
+    background:#0d121b;border-bottom:1px solid var(--border);
+  }
+  .dot{width:12px;height:12px;border-radius:50%}
+  .dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+  .term-title{margin-left:10px;font-size:12px;color:var(--fg-dim)}
+  .term-body{padding:20px 22px;font-size:13.5px;min-height:230px}
+  .term-body .line{white-space:pre-wrap;word-break:break-word}
+  .pr{color:var(--accent)}
+  .pr2{color:var(--accent2)}
+  .cm{color:#fff}
+  .ot{color:var(--fg-dim)}
+  .ok{color:var(--accent)}
+  .yl{color:var(--yellow)}
+  .cursor{display:inline-block;width:9px;height:16px;background:var(--accent);vertical-align:-3px;animation:blink 1.05s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  /* ---------- sections ---------- */
+  section{padding:64px 0}
+  .eyebrow{color:var(--accent2);font-size:12px;letter-spacing:2px;text-transform:uppercase}
+  h2{font-size:30px;color:#fff;font-weight:800;margin:8px 0 8px;letter-spacing:-.5px}
+  h2::before{content:"# ";color:var(--accent)}
+  .lead{color:var(--fg-dim);max-width:680px;margin-bottom:30px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px}
+  .card{
+    background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:22px;transition:.2s;position:relative;overflow:hidden;
+  }
+  .card::after{content:"";position:absolute;inset:0;border-radius:12px;pointer-events:none;
+    box-shadow:inset 0 0 0 1px transparent;transition:.2s}
+  .card:hover{transform:translateY(-3px);border-color:rgba(94,242,179,.4)}
+  .card:hover::after{box-shadow:inset 0 0 30px rgba(94,242,179,.07)}
+  .card .ic{font-size:24px;margin-bottom:12px}
+  .card h3{color:#fff;font-size:16px;margin-bottom:7px}
+  .card h3 .k{color:var(--accent)}
+  .card p{color:var(--fg-dim);font-size:13.5px}
+
+  /* code blocks */
+  .code{
+    position:relative;background:#0b0f17;border:1px solid var(--border);
+    border-radius:10px;margin:16px 0;
+  }
+  .code-head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:8px 14px;border-bottom:1px solid var(--border);
+    font-size:11.5px;color:var(--fg-dim);
+  }
+  .code pre{padding:16px 18px;overflow-x:auto;font-size:13px;line-height:1.7}
+  .code code{font-family:inherit}
+  .copy{
+    background:transparent;border:1px solid var(--border);color:var(--fg-dim);
+    font-family:inherit;font-size:11px;padding:3px 10px;border-radius:6px;cursor:pointer;transition:.15s;
+  }
+  .copy:hover{color:var(--accent);border-color:var(--accent)}
+  .copy.done{color:var(--accent);border-color:var(--accent)}
+  .c-cmt{color:var(--fg-dim)}
+  .c-cmd{color:var(--accent)}
+  .c-arg{color:var(--accent2)}
+  .c-str{color:var(--yellow)}
+
+  /* steps */
+  .steps{counter-reset:s;display:grid;gap:14px}
+  .step{display:flex;gap:16px;align-items:flex-start}
+  .step .n{
+    flex:none;counter-increment:s;width:34px;height:34px;border-radius:9px;
+    display:grid;place-items:center;background:var(--panel);
+    border:1px solid var(--border);color:var(--accent);font-weight:700;
+  }
+  .step .n::before{content:counter(s)}
+  .step .b{flex:1}
+  .step h4{color:#fff;font-size:15px}
+  .step p{color:var(--fg-dim);font-size:13.5px}
+
+  .arch{
+    margin-top:24px;background:var(--panel);border:1px solid var(--border);
+    border-radius:12px;padding:24px;text-align:center;
+  }
+  .arch img{max-width:100%;height:auto;filter:drop-shadow(0 10px 30px rgba(0,0,0,.5))}
+
+  .warn{
+    margin-top:18px;border:1px solid rgba(255,107,138,.3);background:rgba(255,107,138,.06);
+    border-radius:10px;padding:16px 18px;font-size:13.5px;color:var(--fg);
+  }
+  .warn b{color:var(--red)}
+
+  footer{border-top:1px solid var(--border);padding:40px 0 60px;text-align:center;color:var(--fg-dim);font-size:13px}
+  footer a{color:var(--accent)}
+  .heart{color:var(--red)}
+
+  @media(max-width:600px){
+    nav .links{display:none}
+    .term-body{font-size:12px}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="brand">sk8<span class="blink">_</span></div>
+    <div class="links">
+      <a href="#what">what</a>
+      <a href="#quickstart">quickstart</a>
+      <a href="#cli">cli</a>
+      <a href="#arch">architecture</a>
+      <a href="https://github.com/yanndebray/sk8">github ↗</a>
+    </div>
+  </div>
+</nav>
+
+<header>
+  <div class="wrap">
+    <span class="tag">◆ remote Claude Code agents over MCP</span>
+    <h1><span class="board">🛹</span> sk8</h1>
+    <p class="sub">
+      A minimal <b>MCP server</b> that exposes a <b>remote Claude Code agent</b> over HTTP.
+      Your laptop's Claude Code calls one tool — <b>run_task</b> — to delegate a whole,
+      self-contained job to an agent running on Cloud Run.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="#quickstart">⚡ Get started</a>
+      <a class="btn ghost" href="https://github.com/yanndebray/sk8">★ Star on GitHub</a>
+    </div>
+
+    <!-- live terminal -->
+    <div class="term" id="term">
+      <div class="term-bar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="term-title">~/agents — sk8</span>
+      </div>
+      <div class="term-body" id="termBody"></div>
+    </div>
+  </div>
+</header>
+
+<section id="what">
+  <div class="wrap">
+    <div class="eyebrow">// the idea</div>
+    <h2>delegate, don't context-switch</h2>
+    <p class="lead">
+      sk8 runs <code>claude</code> headless on a remote box and returns the final answer.
+      It's deliberately tiny: <b>synchronous and blocking</b> — no queue, no streaming, no status polling.
+      Fire a task, get the result.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <div class="ic">🛰️</div>
+        <h3>One tool: <span class="k">run_task</span></h3>
+        <p>The remote agent runs your prompt in its <code>cwd</code> and hands back the final text answer. That's the whole API surface.</p>
+      </div>
+      <div class="card">
+        <div class="ic">🧬</div>
+        <h3>Profiles <span class="k">baked in</span></h3>
+        <p>Customize each agent per profile — extra Python packages, bundled Claude Code skills, and a tool / MCP / system-prompt spec compiled into the image at build time.</p>
+      </div>
+      <div class="card">
+        <div class="ic">⚙️</div>
+        <h3>Powered by the <span class="k">Agent SDK</span></h3>
+        <p><code>server_sdk.py</code> drives the agent loop through the Claude Agent SDK — a typed async message stream with structured permission control.</p>
+      </div>
+      <div class="card">
+        <div class="ic">📦</div>
+        <h3>Files in &amp; out <span class="k">(optional)</span></h3>
+        <p>GCS-backed signed URLs move inputs and artifacts around <code>run_task</code> without bloating the prompt or hitting the 32 MB request cap.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart" style="background:var(--bg-soft);border-block:1px solid var(--border)">
+  <div class="wrap">
+    <div class="eyebrow">// 60 seconds</div>
+    <h2>quickstart</h2>
+    <p class="lead">Install the CLI, provision an agent on Cloud Run, and wire it into Claude Code.</p>
+
+    <div class="code">
+      <div class="code-head"><span>install the sk8 CLI</span><button class="copy">copy</button></div>
+      <pre><code><span class="c-cmt"># install the `sk8` command from this repo (uv / pipx / pip all work)</span>
+<span class="c-cmd">uv</span> tool install <span class="c-arg">.</span>
+
+<span class="c-cmt"># build the agent image (first time) + provision on Cloud Run</span>
+<span class="c-cmd">sk8</span> create <span class="c-arg">iris</span> --build
+
+<span class="c-cmt"># custom deps / skills / tools via a profile</span>
+<span class="c-cmd">sk8</span> create <span class="c-arg">iris</span> --profile <span class="c-str">./profiles/data-analyst</span> --build</code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>connect it to Claude Code & verify</span><button class="copy">copy</button></div>
+      <pre><code><span class="c-cmt"># `sk8 create` prints the exact `claude mcp add ...` line — run it, then:</span>
+<span class="c-cmd">claude</span> mcp list      <span class="c-cmt"># sk8 should show as connected</span></code></pre>
+    </div>
+
+    <p class="lead" style="margin:22px 0 0">Then, in a Claude Code session on your laptop:</p>
+    <div class="code">
+      <div class="code-head"><span>delegate a task</span><button class="copy">copy</button></div>
+      <pre><code><span class="c-str">Use the sk8 run_task tool with prompt:
+"list the files in the current directory and summarize them"</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<section id="cli">
+  <div class="wrap">
+    <div class="eyebrow">// the lifecycle</div>
+    <h2>the sk8 CLI</h2>
+    <p class="lead">
+      Scriptable for humans and agents alike — it emits JSON so a running agent can spawn and
+      register its own sub-agents.
+    </p>
+    <div class="code">
+      <div class="code-head"><span>sk8 &lt;cmd&gt;</span><button class="copy">copy</button></div>
+      <pre><code><span class="c-cmd">sk8</span> create <span class="c-arg">iris</span> --build     <span class="c-cmt"># build image (first time) + provision</span>
+<span class="c-cmd">sk8</span> create <span class="c-arg">iris</span>             <span class="c-cmt"># subsequent agents reuse the image</span>
+<span class="c-cmd">sk8</span> create <span class="c-arg">iris</span> --json      <span class="c-cmt"># {url, token, mcp_add_command} for agents</span>
+<span class="c-cmd">sk8</span> create <span class="c-arg">iris</span> --dry-run   <span class="c-cmt"># preview the gcloud commands offline</span>
+<span class="c-cmd">sk8</span> list                    <span class="c-cmt"># list deployed agents in the region</span>
+<span class="c-cmd">sk8</span> delete <span class="c-arg">iris</span> --yes       <span class="c-cmt"># tear down service + token secret</span>
+<span class="c-cmd">sk8</span> suggest <span class="c-arg">5</span>              <span class="c-cmt"># propose adjective-noun names</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<section id="arch" style="background:var(--bg-soft);border-block:1px solid var(--border)">
+  <div class="wrap">
+    <div class="eyebrow">// under the hood</div>
+    <h2>architecture</h2>
+    <p class="lead">
+      The GCP services (Cloud Build, Artifact Registry, Secret Manager, IAM, Cloud Run) and the
+      agent lifecycle — image build → token mint → a <code>run_task</code> call triggering Cloud Run.
+    </p>
+    <div class="arch">
+      <img src="architecture.svg" alt="sk8 remote agent GCP architecture">
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <div class="eyebrow">// fine print</div>
+    <h2>limitations</h2>
+    <div class="grid">
+      <div class="card"><h3>⏳ Synchronous only</h3><p><code>run_task</code> blocks until the agent finishes (up to a 600s timeout). No streaming, no progress, no status to poll.</p></div>
+      <div class="card"><h3>🚦 One task at a time</h3><p>No queue or concurrency management — fire tasks serially.</p></div>
+      <div class="card"><h3>🧠 Stateless across calls</h3><p>Each call is a fresh headless <code>claude</code> with no memory of prior tasks. Put all context in the prompt.</p></div>
+    </div>
+    <div class="warn">
+      <b>⚠ Arbitrary code execution.</b> <code>claude</code> can do anything the host user can.
+      Treat reaching this endpoint as equivalent to a shell on the box — secure it accordingly.
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="brand" style="font-size:22px;margin-bottom:8px">sk8 🛹</div>
+    <p>Open source · <a href="https://github.com/yanndebray/sk8">github.com/yanndebray/sk8</a></p>
+    <p style="margin-top:8px">Built with <span class="heart">♥</span> and a healthy fear of <code>rm -rf</code>.</p>
+  </div>
+</footer>
+
+<script>
+  /* copy buttons */
+  document.querySelectorAll('.copy').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const code=btn.closest('.code').querySelector('code').innerText;
+      navigator.clipboard.writeText(code).then(()=>{
+        btn.textContent='copied ✓';btn.classList.add('done');
+        setTimeout(()=>{btn.textContent='copy';btn.classList.remove('done')},1400);
+      });
+    });
+  });
+
+  /* typing terminal */
+  const seq=[
+    {t:'prompt',txt:'sk8 create iris --build'},
+    {t:'out',cls:'ot',txt:'→ building agent image…'},
+    {t:'out',cls:'ot',txt:'→ minting token · deploying to Cloud Run…'},
+    {t:'out',cls:'ok',txt:'✓ agent "iris" live  ·  https://iris-xxxx.run.app'},
+    {t:'out',cls:'yl',txt:'  claude mcp add iris --transport http https://iris-xxxx.run.app …'},
+    {t:'blank'},
+    {t:'prompt',txt:'claude'},
+    {t:'out',cls:'pr2',txt:'> Use sk8 run_task: "summarize every file in ./src"'},
+    {t:'out',cls:'ot',txt:'… remote agent working …'},
+    {t:'out',cls:'ok',txt:'✓ 14 files summarized → returned final answer'},
+    {t:'blank'},
+    {t:'prompt',txt:'',hold:true},
+  ];
+  const body=document.getElementById('termBody');
+  let si=0;
+  function newLine(){const d=document.createElement('div');d.className='line';body.appendChild(d);return d;}
+  function typeStep(){
+    if(si>=seq.length){return;}
+    const s=seq[si++];
+    if(s.t==='blank'){newLine().innerHTML='&nbsp;';return setTimeout(typeStep,160);}
+    if(s.t==='out'){
+      const l=newLine();l.innerHTML=`<span class="${s.cls}">${s.txt}</span>`;
+      return setTimeout(typeStep,s.cls==='ot'?520:300);
+    }
+    // prompt: type char by char
+    const l=newLine();
+    const prefix='<span class="pr">➜</span> <span class="pr2">~/agents</span> <span class="cm">$ </span>';
+    let i=0;const txt=s.txt;
+    l.innerHTML=prefix+'<span class="cursor"></span>';
+    (function tick(){
+      if(i<=txt.length){
+        l.innerHTML=prefix+'<span class="cm">'+txt.slice(0,i)+'</span><span class="cursor"></span>';
+        i++;setTimeout(tick,42);
+      }else{
+        if(s.hold){l.innerHTML=prefix+'<span class="cursor"></span>';return;}
+        l.innerHTML=prefix+'<span class="cm">'+txt+'</span>';
+        setTimeout(typeStep,360);
+      }
+    })();
+  }
+  typeStep();
+</script>
+</body>
+</html>
